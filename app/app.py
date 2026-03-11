@@ -57,6 +57,14 @@ clearly — do not guess or invent rules.
 Context:
 {context}"""
 
+SYSTEM_PROMPT_GC_SUFFIX = """
+
+GERMAN COMP MODE IS ACTIVE: The user is playing under GermanComp rules (v1.6.1). \
+When answering, always check whether GermanComp modifies the relevant rule or unit. \
+If a GermanComp passage is present in the context, clearly state the GermanComp \
+change and distinguish it from the standard TOW rule. \
+Label standard rules as "(Standard TOW)" and GermanComp changes as "(GermanComp)"."""
+
 ARMIES = [
     "All armies",
     "Beastmen Brayherds", "Chaos Dwarfs", "Daemons of Chaos", "Dark Elves",
@@ -67,11 +75,49 @@ ARMIES = [
 ]
 
 
+MOCK_PINECONE = os.environ.get("MOCK_PINECONE", "false").lower() == "true"
+
+MOCK_MATCHES = [
+    {
+        "metadata": {
+            "title": "The Movement Phase",
+            "section": "Moving Units",
+            "url": "https://tow.whfb.app/the-movement-phase",
+            "source": "tow.whfb.app",
+            "army": "",
+            "text": (
+                "During the Movement phase, players move their units across the battlefield. "
+                "Each unit may move up to its Move (M) value in inches. Units in march order "
+                "may move up to double their Move value but may not shoot afterwards."
+            ),
+        },
+        "score": 0.91,
+    },
+    {
+        "metadata": {
+            "title": "Empire Swordsmen",
+            "section": "",
+            "url": "https://old-world-builder.com",
+            "source": "old-world-builder",
+            "army": "Empire of Man",
+            "text": (
+                "Unit: Swordsmen (Empire of Man)\n"
+                "Stats: M: 4 | WS: 3 | BS: 3 | S: 3 | T: 3 | W: 1 | I: 3 | A: 1 | Ld: 7\n"
+                "Points: 6 per model\nSpecial Rules: Hand weapon, Shield"
+            ),
+        },
+        "score": 0.85,
+    },
+]
+
+
 # ── Cached clients (initialised once per session) ────────────────────────────
 
 @st.cache_resource
 def get_clients():
     openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    if MOCK_PINECONE:
+        return openai_client, None
     pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
     index = pc.Index(INDEX_NAME)
     return openai_client, index
@@ -84,12 +130,53 @@ def embed_query(client: OpenAI, text: str) -> list[float]:
     return resp.data[0].embedding
 
 
-def retrieve(index, query_vector: list[float], army_filter: str | None, top_k: int = TOP_K):
-    """Query Pinecone, optionally filtering by army name."""
+def retrieve(
+    index,
+    query_vector: list[float],
+    army_filter: str | None,
+    german_comp_mode: bool = False,
+    top_k: int = TOP_K,
+):
+    """Query Pinecone, optionally filtering by army and boosting GermanComp results."""
+    if MOCK_PINECONE:
+        class _Match:
+            def __init__(self, d):
+                self.metadata = d["metadata"]
+                self.score = d["score"]
+        class _Result:
+            matches = [_Match(m) for m in MOCK_MATCHES]
+        return _Result()
+
+    # Standard query
     kwargs = dict(vector=query_vector, top_k=top_k, include_metadata=True)
     if army_filter:
         kwargs["filter"] = {"army": {"$eq": army_filter}}
-    return index.query(**kwargs)
+    result = index.query(**kwargs)
+
+    if not german_comp_mode:
+        return result
+
+    # In German Comp mode: also fetch top GermanComp-specific matches and merge
+    gc_result = index.query(
+        vector=query_vector,
+        top_k=4,
+        include_metadata=True,
+        filter={"source": {"$eq": "german-comp"}},
+    )
+
+    # Merge, deduplicating by text content
+    seen_texts: set[str] = set()
+    merged: list = []
+    for match in list(result.matches) + list(gc_result.matches):
+        text = (match.metadata or {}).get("text", "")
+        if text not in seen_texts:
+            seen_texts.add(text)
+            merged.append(match)
+
+    class _MergedResult:
+        matches = merged
+
+    return _MergedResult()
 
 
 def build_context(matches) -> tuple[str, list[dict]]:
@@ -127,9 +214,18 @@ def build_context(matches) -> tuple[str, list[dict]]:
     return "\n\n---\n\n".join(parts), sources
 
 
-def answer(client: OpenAI, question: str, context: str, history: list[dict]) -> str:
+def answer(
+    client: OpenAI,
+    question: str,
+    context: str,
+    history: list[dict],
+    german_comp_mode: bool = False,
+) -> str:
     """Call GPT-4o with the retrieved context and chat history."""
-    messages = [{"role": "system", "content": SYSTEM_PROMPT.format(context=context)}]
+    base_prompt = SYSTEM_PROMPT
+    if german_comp_mode:
+        base_prompt = base_prompt + SYSTEM_PROMPT_GC_SUFFIX
+    messages = [{"role": "system", "content": base_prompt.format(context=context)}]
     # Include last 6 turns of history for conversational follow-ups
     messages.extend(history[-12:])
     messages.append({"role": "user", "content": question})
@@ -190,6 +286,19 @@ def main():
         army_filter = None if army_choice == "All armies" else army_choice
 
         st.divider()
+        st.subheader("Ruleset")
+        german_comp_mode = st.toggle(
+            "GermanComp mode",
+            value=False,
+            help=(
+                "When enabled, GermanComp rules (v1.6.1) are retrieved alongside "
+                "standard TOW rules and the assistant will highlight any differences."
+            ),
+        )
+        if german_comp_mode:
+            st.info("⚔️ GermanComp v1.6.1 active", icon="🇩🇪")
+
+        st.divider()
         if st.button("Clear chat history"):
             st.session_state.messages = []
             st.session_state.sources_history = []
@@ -199,6 +308,7 @@ def main():
         st.markdown("**Data sources**")
         st.markdown("- [TOW Rules Index](https://tow.whfb.app)")
         st.markdown("- [Old World Builder](https://old-world-builder.com)")
+        st.markdown("- [GermanComp PDF](https://drive.google.com/file/d/172mG0ep6EgJClJiGijulksZSr1eDLZl5/view)")
 
     # ── Session state ─────────────────────────────────────────────────────────
     if "messages" not in st.session_state:
@@ -241,9 +351,9 @@ def main():
                 try:
                     client, index = get_clients()
                     query_vec = embed_query(client, prompt)
-                    results = retrieve(index, query_vec, army_filter)
+                    results = retrieve(index, query_vec, army_filter, german_comp_mode)
                     context, sources = build_context(results.matches)
-                    response = answer(client, prompt, context, st.session_state.messages[:-1])
+                    response = answer(client, prompt, context, st.session_state.messages[:-1], german_comp_mode)
                 except Exception as e:
                     response = f"⚠️ Error: {e}"
                     sources = []
