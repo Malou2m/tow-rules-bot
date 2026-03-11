@@ -16,13 +16,19 @@ Design decisions:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import streamlit as st
+import streamlit_authenticator as stauth
+import yaml
 from dotenv import load_dotenv
 from openai import OpenAI
 from pinecone import Pinecone
+from yaml.loader import SafeLoader
 
 load_dotenv()
+
+AUTH_CONFIG_PATH = Path(__file__).parent.parent / "auth_config.yaml"
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 EMBEDDING_MODEL = "text-embedding-3-small"
@@ -139,6 +145,22 @@ def answer(client: OpenAI, question: str, context: str, history: list[dict]) -> 
 
 # ── Streamlit UI ──────────────────────────────────────────────────────────────
 
+def get_authenticator() -> stauth.Authenticate:
+    with open(AUTH_CONFIG_PATH) as f:
+        config = yaml.load(f, Loader=SafeLoader)
+    authenticator = stauth.Authenticate(
+        credentials=config["credentials"],
+        cookie_name=config["cookie"]["name"],
+        cookie_key=config["cookie"]["key"],
+        cookie_expiry_days=config["cookie"]["expiry_days"],
+        auto_hash=True,
+    )
+    # Persist auto-hashed passwords back to the config file on first run
+    with open(AUTH_CONFIG_PATH, "w") as f:
+        yaml.dump(config, f, default_flow_style=False)
+    return authenticator
+
+
 def main():
     st.set_page_config(
         page_title="Warhammer: The Old World — Rules Bot",
@@ -146,11 +168,23 @@ def main():
         layout="centered",
     )
 
+    # ── Authentication ────────────────────────────────────────────────────────
+    authenticator = get_authenticator()
+    authenticator.login(location="main", max_login_attempts=5)
+
+    if st.session_state.get("authentication_status") is False:
+        st.error("Incorrect username or password.")
+        st.stop()
+    if st.session_state.get("authentication_status") is None:
+        st.stop()
+
+    # ── Authenticated content below ───────────────────────────────────────────
     st.title("⚔️ Warhammer: The Old World — Rules Bot")
     st.caption("Ask me anything about TOW rules, army compositions, units, magic, and more.")
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
+        authenticator.logout(button_name="Logout", location="sidebar")
         st.header("Settings")
         army_choice = st.selectbox("Filter by army", ARMIES)
         army_filter = None if army_choice == "All armies" else army_choice
