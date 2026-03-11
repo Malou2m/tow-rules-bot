@@ -1,11 +1,11 @@
 """
 Unit tests for pipeline/army_data.py
 
-We test:
-- _unit_to_text: correct field extraction for known and unknown stat keys
-- _spell_to_text: correct spell formatting
-- _flatten_json: unit detection, spell detection, army containers, recursion, unknown shapes
-- fetch_army_data: cache hit path, HTTP fetch path (httpx mocked), HTTP error handling
+Tests cover:
+- _army_name: slug-to-display-name conversion
+- _list_to_str: list of dicts to comma-separated string
+- _unit_to_text: correct field extraction from the real JSON structure
+- fetch_army_data: cache hit, HTTP fetch (mocked), HTTP error handling, caching
 """
 
 import json
@@ -15,234 +15,217 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pipeline.army_data import (
-    _flatten_json,
-    _spell_to_text,
+    _army_name,
+    _list_to_str,
     _unit_to_text,
     fetch_army_data,
 )
 
 
+# ── _army_name ────────────────────────────────────────────────────────────────
+
+class TestArmyName:
+    def test_converts_slug_to_title_case(self):
+        assert _army_name("empire-of-man") == "Empire Of Man"
+
+    def test_single_word(self):
+        assert _army_name("skaven") == "Skaven"
+
+    def test_multiple_hyphens(self):
+        assert _army_name("tomb-kings-of-khemri") == "Tomb Kings Of Khemri"
+
+
+# ── _list_to_str ──────────────────────────────────────────────────────────────
+
+class TestListToStr:
+    def test_joins_name_en_fields(self):
+        items = [{"name_en": "Sword"}, {"name_en": "Shield"}]
+        assert _list_to_str(items) == "Sword, Shield"
+
+    def test_skips_items_without_key(self):
+        items = [{"name_en": "Sword"}, {"points": 5}, {"name_en": "Shield"}]
+        assert _list_to_str(items) == "Sword, Shield"
+
+    def test_empty_list_returns_empty_string(self):
+        assert _list_to_str([]) == ""
+
+    def test_custom_key(self):
+        items = [{"id": "swords"}, {"id": "shields"}]
+        assert _list_to_str(items, key="id") == "swords, shields"
+
+
 # ── _unit_to_text ──────────────────────────────────────────────────────────────
 
 class TestUnitToText:
-    def test_basic_unit_includes_name_and_army(self):
-        unit = {"name_en": "Swordsmen", "WS": 3, "S": 3, "T": 3, "W": 1, "points": 60}
-        text = _unit_to_text(unit, "Empire of Man")
+    def _make_unit(self, **kwargs):
+        base = {
+            "name_en": "Swordsmen",
+            "id": "swordsmen",
+            "points": 6,
+            "minimum": 10,
+            "maximum": 40,
+        }
+        base.update(kwargs)
+        return base
+
+    def test_includes_name_army_and_category(self):
+        unit = self._make_unit()
+        text = _unit_to_text(unit, "Empire Of Man", "core")
         assert "Swordsmen" in text
-        assert "Empire of Man" in text
+        assert "Empire Of Man" in text
+        assert "Core" in text
 
-    def test_stats_are_included(self):
-        unit = {"name": "Knight", "WS": 4, "BS": 3, "S": 4, "T": 4, "W": 1}
-        text = _unit_to_text(unit, "Bretonnia")
-        assert "WS" in text
-        assert "4" in text
+    def test_includes_points(self):
+        unit = self._make_unit(points=11)
+        text = _unit_to_text(unit, "Empire Of Man", "special")
+        assert "11" in text
 
-    def test_points_are_included(self):
-        unit = {"name_en": "Spearmen", "points": 75, "T": 3}
-        text = _unit_to_text(unit, "High Elves")
-        assert "75" in text
+    def test_includes_min_max_size(self):
+        unit = self._make_unit(minimum=5, maximum=20)
+        text = _unit_to_text(unit, "Empire Of Man", "core")
+        assert "5" in text
+        assert "20" in text
 
-    def test_special_rules_list_is_joined(self):
-        unit = {"name_en": "Chaos Warriors", "special_rules": ["Chaos Armour", "Marching Fire"], "T": 4}
-        text = _unit_to_text(unit, "Warriors of Chaos")
-        assert "Chaos Armour" in text
-        assert "Marching Fire" in text
+    def test_includes_equipment(self):
+        unit = self._make_unit(equipment=[
+            {"name_en": "Hand weapon"}, {"name_en": "Shield"}
+        ])
+        text = _unit_to_text(unit, "Empire Of Man", "core")
+        assert "Hand weapon" in text
+        assert "Shield" in text
 
-    def test_special_rules_string_is_included(self):
-        unit = {"name_en": "Skeleton", "special_rules_en": "Undead, Shambling", "T": 2}
-        text = _unit_to_text(unit, "Tomb Kings")
-        assert "Undead" in text
+    def test_includes_command(self):
+        unit = self._make_unit(command=[
+            {"name_en": "Champion", "points": 8},
+            {"name_en": "Standard bearer", "points": 6},
+        ])
+        text = _unit_to_text(unit, "Empire Of Man", "core")
+        assert "Champion" in text
+        assert "Standard bearer" in text
 
-    def test_description_is_included(self):
-        unit = {"name_en": "Goblin", "description_en": "Small and sneaky green creatures.", "T": 2}
-        text = _unit_to_text(unit, "Orcs")
-        assert "sneaky" in text
+    def test_includes_options(self):
+        unit = self._make_unit(options=[{"name_en": "Full plate armour"}])
+        text = _unit_to_text(unit, "Empire Of Man", "special")
+        assert "Full plate armour" in text
 
-    def test_unknown_unit_name_falls_back(self):
-        unit = {"T": 3, "W": 1}  # no name key
-        text = _unit_to_text(unit, "Unknown Army")
-        assert "Unknown Unit" in text
+    def test_includes_magic_allowance(self):
+        unit = self._make_unit(magic={"types": ["weapon", "armor"], "maxPoints": 50})
+        text = _unit_to_text(unit, "Empire Of Man", "characters")
+        assert "weapon" in text
+        assert "50" in text
 
-    def test_points_per_model_included(self):
-        unit = {"name_en": "Clanrats", "points_per_model": 4, "T": 3}
-        text = _unit_to_text(unit, "Skaven")
-        assert "Points per model" in text
-        assert "4" in text
+    def test_falls_back_to_id_when_no_name_en(self):
+        unit = {"id": "greatswords", "points": 11}
+        text = _unit_to_text(unit, "Empire Of Man", "special")
+        assert "greatswords" in text
 
-
-# ── _spell_to_text ─────────────────────────────────────────────────────────────
-
-class TestSpellToText:
-    def test_basic_spell(self):
-        spell = {"name_en": "Fireball", "casting_value": 7, "effect": "Deals D6 hits S4."}
-        text = _spell_to_text(spell, "Fire")
-        assert "Fireball" in text
-        assert "Lore of Fire" in text
-        assert "7" in text
-        assert "D6 hits" in text
-
-    def test_spell_with_cast_key(self):
-        spell = {"name": "Frostbolt", "cast": 9, "description": "Freezes target."}
-        text = _spell_to_text(spell, "Ice")
-        assert "Casting Value" in text
-        assert "9" in text
-
-    def test_spell_range_and_duration(self):
-        spell = {"name_en": "Shield", "range": "Self", "duration": "One turn",
-                 "casting_value": 5, "effect": "Ward save 5+."}
-        text = _spell_to_text(spell, "Life")
-        assert "Range" in text
-        assert "Duration" in text
-
-    def test_unknown_spell_name_fallback(self):
-        spell = {"casting_value": 6, "effect": "Does something."}
-        text = _spell_to_text(spell, "Death")
-        assert "Spell" in text
-
-
-# ── _flatten_json ──────────────────────────────────────────────────────────────
-
-class TestFlattenJson:
-    def test_unit_dict_detected_by_ws(self):
-        unit = {"name_en": "Halberdier", "WS": 3, "T": 3, "W": 1}
-        docs = _flatten_json(unit, army_name="Empire")
-        assert len(docs) == 1
-        assert docs[0]["type"] == "unit"
-        assert "Halberdier" in docs[0]["text"]
-
-    def test_unit_dict_detected_by_points(self):
-        unit = {"name_en": "Archer", "points": 8, "BS": 3}
-        docs = _flatten_json(unit, army_name="Elves")
-        assert len(docs) == 1
-
-    def test_spell_dict_detected(self):
-        spell = {"name_en": "Lightning", "casting_value": 7, "effect": "Strikes the target."}
-        docs = _flatten_json(spell, army_name="Metal")
-        assert len(docs) == 1
-        assert docs[0]["type"] == "spell"
-
-    def test_army_container_with_units_list(self):
-        army = {
-            "name_en": "Empire",
-            "units": [
-                {"name_en": "Swordsmen", "WS": 3, "T": 3},
-                {"name_en": "Spearmen",  "WS": 3, "T": 3},
-            ]
-        }
-        docs = _flatten_json(army)
-        assert len(docs) == 2
-        titles = [d["title"] for d in docs]
-        assert "Swordsmen" in titles
-        assert "Spearmen" in titles
-
-    def test_lore_container_with_spells(self):
-        lore = {
-            "name_en": "Fire",
-            "spells": [
-                {"name_en": "Fireball", "casting_value": 7, "effect": "D6 hits."},
-                {"name_en": "Inferno",  "casting_value": 10, "effect": "Hits all units."},
-            ]
-        }
-        docs = _flatten_json(lore)
-        assert len(docs) == 2
-        assert all(d["type"] == "spell" for d in docs)
-
-    def test_list_of_armies(self):
-        data = [
-            {"name_en": "Empire", "units": [{"name_en": "Knight", "WS": 4, "T": 4}]},
-            {"name_en": "Dwarfs", "units": [{"name_en": "Warrior", "WS": 4, "T": 4}]},
-        ]
-        docs = _flatten_json(data)
-        assert len(docs) == 2
-
-    def test_empty_dict_returns_empty(self):
-        assert _flatten_json({}) == []
-
-    def test_empty_list_returns_empty(self):
-        assert _flatten_json([]) == []
-
-    def test_unknown_shape_recurses_without_crash(self):
-        data = {"foo": {"bar": {"name_en": "Goblin", "WS": 2, "T": 2}}}
-        docs = _flatten_json(data)
-        assert len(docs) == 1
+    def test_skips_zero_maximum(self):
+        unit = self._make_unit(maximum=0)
+        text = _unit_to_text(unit, "Empire Of Man", "core")
+        # maximum=0 means unlimited, should not appear
+        assert "Max size" not in text
 
 
 # ── fetch_army_data ────────────────────────────────────────────────────────────
 
 class TestFetchArmyData:
+    def _mock_army_response(self):
+        return {
+            "characters": [
+                {"name_en": "General", "id": "general", "points": 90,
+                 "equipment": [{"name_en": "Hand weapon"}]}
+            ],
+            "core": [
+                {"name_en": "Swordsmen", "id": "swordsmen", "points": 6,
+                 "minimum": 10, "maximum": 40}
+            ],
+            "special": [],
+            "rare": [],
+            "mercenaries": [],
+        }
+
     def test_returns_cached_data_when_cache_exists(self, tmp_path, monkeypatch):
         cached = [{"source": "old-world-builder", "type": "unit",
-                   "title": "Knight", "army": "Bretonnia", "text": "Unit: Knight"}]
+                   "title": "Swordsmen", "army": "Empire Of Man", "text": "Unit: Swordsmen"}]
         cache_file = tmp_path / "army_data.json"
         cache_file.write_text(json.dumps(cached))
-
         monkeypatch.setattr("pipeline.army_data.CACHE_FILE", cache_file)
 
         result = fetch_army_data(force=False)
         assert result == cached
 
-    def test_force_flag_bypasses_cache(self, tmp_path, monkeypatch):
-        # Put stale data in cache
+    def test_force_bypasses_cache(self, tmp_path, monkeypatch):
         stale = [{"stale": True}]
         cache_file = tmp_path / "army_data.json"
         cache_file.write_text(json.dumps(stale))
-
         monkeypatch.setattr("pipeline.army_data.CACHE_FILE", cache_file)
 
-        fresh_data = {
-            "name_en": "Skaven",
-            "units": [{"name_en": "Clanrat", "WS": 3, "T": 3}]
-        }
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._mock_army_response()
+        mock_resp.raise_for_status = MagicMock()
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
 
-        with patch("pipeline.army_data.httpx.Client") as mock_client_cls:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = fresh_data
-            mock_resp.raise_for_status = MagicMock()
-            mock_client = MagicMock()
-            mock_client.__enter__ = MagicMock(return_value=mock_client)
-            mock_client.__exit__ = MagicMock(return_value=False)
-            mock_client.get.return_value = mock_resp
-            mock_client_cls.return_value = mock_client
-
+        with patch("pipeline.army_data.httpx.Client", return_value=mock_client):
             result = fetch_army_data(force=True)
 
         assert result != stale
-        assert any("Clanrat" in d.get("text", "") for d in result)
+        assert any("General" in d.get("text", "") or "Swordsmen" in d.get("text", "") for d in result)
 
     def test_http_error_is_handled_gracefully(self, tmp_path, monkeypatch):
         cache_file = tmp_path / "army_data.json"
         monkeypatch.setattr("pipeline.army_data.CACHE_FILE", cache_file)
 
-        with patch("pipeline.army_data.httpx.Client") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.__enter__ = MagicMock(return_value=mock_client)
-            mock_client.__exit__ = MagicMock(return_value=False)
-            mock_client.get.side_effect = Exception("Network error")
-            mock_client_cls.return_value = mock_client
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.side_effect = Exception("Network error")
 
-            # Should not raise — errors are caught and warned
+        with patch("pipeline.army_data.httpx.Client", return_value=mock_client):
             result = fetch_army_data(force=True)
 
         assert result == []
 
-    def test_result_is_cached_to_file(self, tmp_path, monkeypatch):
+    def test_result_is_written_to_cache(self, tmp_path, monkeypatch):
         cache_file = tmp_path / "army_data.json"
         monkeypatch.setattr("pipeline.army_data.CACHE_FILE", cache_file)
 
-        fresh_data = {"name_en": "Empire", "units": [{"name_en": "Swordsman", "WS": 3, "T": 3}]}
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._mock_army_response()
+        mock_resp.raise_for_status = MagicMock()
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
 
-        with patch("pipeline.army_data.httpx.Client") as mock_client_cls:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = fresh_data
-            mock_resp.raise_for_status = MagicMock()
-            mock_client = MagicMock()
-            mock_client.__enter__ = MagicMock(return_value=mock_client)
-            mock_client.__exit__ = MagicMock(return_value=False)
-            mock_client.get.return_value = mock_resp
-            mock_client_cls.return_value = mock_client
-
+        with patch("pipeline.army_data.httpx.Client", return_value=mock_client):
             fetch_army_data(force=True)
 
         assert cache_file.exists()
         saved = json.loads(cache_file.read_text())
         assert isinstance(saved, list)
+
+    def test_each_doc_has_required_keys(self, tmp_path, monkeypatch):
+        cache_file = tmp_path / "army_data.json"
+        monkeypatch.setattr("pipeline.army_data.CACHE_FILE", cache_file)
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._mock_army_response()
+        mock_resp.raise_for_status = MagicMock()
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+
+        with patch("pipeline.army_data.httpx.Client", return_value=mock_client):
+            result = fetch_army_data(force=True)
+
+        for doc in result:
+            assert "source" in doc
+            assert "type" in doc
+            assert "army" in doc
+            assert "title" in doc
+            assert "text" in doc
+            assert "url" in doc
