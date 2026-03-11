@@ -1,0 +1,11 @@
+credentials:
+  usernames:
+    TOW:
+      email: ockenfels.malou@hotmail.fr
+      name: TOW
+      password: therulebot  # auto-hashed on first login by streamlit-authenticator
+
+cookie:
+  expiry_days: 7
+  key: tow_rules_secret_key_change_this
+  name: tow_rules_auth
