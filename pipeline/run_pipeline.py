@@ -9,6 +9,7 @@ Flags:
     --force-army     Re-fetch army data even if cache exists
     --skip-tow       Skip tow.whfb.app scraping (army data only)
     --skip-army      Skip old-world-builder data (rules only)
+    --german-comp    Also ingest GermanComp rules into Pinecone
     --dry-run        Chunk + embed but do NOT upsert to Pinecone
 """
 
@@ -16,7 +17,6 @@ import argparse
 import asyncio
 import os
 import sys
-from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -24,8 +24,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from pipeline.army_data import fetch_army_data
-from pipeline.chunker import build_all_chunks
+from pipeline.chunker import build_all_chunks, chunk_army_docs
 from pipeline.embedder import create_embeddings
+from pipeline.german_comp_data import fetch_german_comp_data
 from pipeline.ingest import upsert_chunks
 from pipeline.scraper import scrape_all
 
@@ -36,6 +37,7 @@ def parse_args():
     parser.add_argument("--force-army",   action="store_true", help="Re-fetch army data")
     parser.add_argument("--skip-tow",     action="store_true", help="Skip tow.whfb.app")
     parser.add_argument("--skip-army",    action="store_true", help="Skip old-world-builder data")
+    parser.add_argument("--german-comp",  action="store_true", help="Ingest GermanComp rules")
     parser.add_argument("--dry-run",      action="store_true", help="Embed but don't upsert")
     return parser.parse_args()
 
@@ -62,9 +64,19 @@ def main():
         print("\n── Step 1b: Fetching army data (old-world-builder) ──")
         army_docs = fetch_army_data(force=args.force_army)
 
+    german_comp_docs = []
+    if args.german_comp:
+        print("\n── Step 1c: Loading GermanComp rules ──")
+        german_comp_docs = fetch_german_comp_data()
+
     # ── Step 2: Chunk ─────────────────────────────────────────────────────────
     print("\n── Step 2: Chunking ──")
     chunks = build_all_chunks(tow_pages, army_docs)
+    if german_comp_docs:
+        gc_chunks = chunk_army_docs(german_comp_docs)
+        print(f"  + {len(gc_chunks)} GermanComp chunks")
+        chunks = chunks + gc_chunks
+
     if not chunks:
         print("No chunks produced — nothing to do.")
         sys.exit(0)
@@ -73,7 +85,7 @@ def main():
     print("\n── Step 3: Embedding ──")
     embedded = create_embeddings(chunks)
 
-    # ── Step 4: Upsert ───────────────────────────────────────────────────────
+    # ── Step 4: Upsert ────────────────────────────────────────────────────────
     if args.dry_run:
         print("\n── Dry run: skipping Pinecone upsert ──")
         print(f"Would upsert {len(embedded)} vectors.")
