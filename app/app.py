@@ -15,6 +15,8 @@ Design decisions:
 
 from __future__ import annotations
 
+import hashlib
+import io
 import os
 from pathlib import Path
 
@@ -239,6 +241,17 @@ def answer(
     return resp.choices[0].message.content
 
 
+def transcribe_audio(client: OpenAI, audio_bytes: bytes) -> str:
+    """Transcribe audio bytes using OpenAI Whisper."""
+    audio_file = io.BytesIO(audio_bytes)
+    audio_file.name = "recording.wav"
+    transcript = client.audio.transcriptions.create(
+        model="whisper-1",
+        file=audio_file,
+    )
+    return transcript.text.strip()
+
+
 # ── Streamlit UI ──────────────────────────────────────────────────────────────
 
 def get_authenticator() -> stauth.Authenticate:
@@ -305,6 +318,10 @@ def main():
             st.rerun()
 
         st.divider()
+        st.subheader("Voice input")
+        audio_input = st.audio_input("🎤 Record a question")
+
+        st.divider()
         st.markdown("**Data sources**")
         st.markdown("- [TOW Rules Index](https://tow.whfb.app)")
         st.markdown("- [Old World Builder](https://old-world-builder.com)")
@@ -315,6 +332,10 @@ def main():
         st.session_state.messages = []
     if "sources_history" not in st.session_state:
         st.session_state.sources_history = []
+    if "last_audio_hash" not in st.session_state:
+        st.session_state.last_audio_hash = None
+    if "pending_prompt" not in st.session_state:
+        st.session_state.pending_prompt = None
 
     # ── Render existing chat ──────────────────────────────────────────────────
     for i, msg in enumerate(st.session_state.messages):
@@ -338,8 +359,29 @@ def main():
                             line += f" _(similarity: {score})_"
                             st.markdown(line)
 
+    # ── Voice transcription ───────────────────────────────────────────────────
+    if audio_input is not None:
+        raw = audio_input.read()
+        audio_hash = hashlib.md5(raw).hexdigest()
+        if st.session_state.last_audio_hash != audio_hash:
+            st.session_state.last_audio_hash = audio_hash
+            with st.spinner("Transcribing audio…"):
+                try:
+                    client, _ = get_clients()
+                    transcribed = transcribe_audio(client, raw)
+                    if transcribed:
+                        st.session_state.pending_prompt = transcribed
+                except Exception as e:
+                    st.error(f"Transcription error: {e}")
+            st.rerun()
+
     # ── Chat input ────────────────────────────────────────────────────────────
-    if prompt := st.chat_input("Ask a rules question…"):
+    text_prompt = st.chat_input("Ask a rules question…")
+    prompt = st.session_state.pending_prompt or text_prompt
+    if st.session_state.pending_prompt:
+        st.session_state.pending_prompt = None
+
+    if prompt:
         # Show user message immediately
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
