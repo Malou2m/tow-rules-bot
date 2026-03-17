@@ -1,0 +1,20 @@
+[Unit]
+Description=Warhammer The Old World Rules Bot (Streamlit)
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/tow-rules-bot
+Environment="PATH=/home/ec2-user/.local/bin:/usr/local/bin:/usr/bin"
+EnvironmentFile=/home/ec2-user/tow-rules-bot/.env
+ExecStart=/home/ec2-user/.local/bin/uv run streamlit run app/app.py \
+    --server.port=8501 \
+    --server.address=0.0.0.0 \
+    --server.headless=true \
+    --browser.gatherUsageStats=false
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
