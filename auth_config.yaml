@@ -1,11 +1,10 @@
-credentials:
-  usernames:
-    TOW:
-      email: REDACTED
-      name: TOW
-      password: REDACTED  # auto-hashed on first login by streamlit-authenticator
-
 cookie:
   expiry_days: 7
   key: tow_rules_secret_key_change_this
   name: tow_rules_auth
+credentials:
+  usernames:
+    tow:
+      email: REDACTED
+      name: TOW
+      password: $2b$12$Z.xNpzo1Mk2FwkeMzVNiNe1AYKpLllX.OP9yBUN1hr.SsR4Bff6Cq

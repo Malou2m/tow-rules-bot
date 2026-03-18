@@ -15,7 +15,6 @@ Design decisions:
 
 from __future__ import annotations
 
-import hashlib
 import io
 import os
 from pathlib import Path
@@ -26,6 +25,7 @@ import yaml
 from dotenv import load_dotenv
 from openai import OpenAI
 from pinecone import Pinecone
+from streamlit_mic_recorder import mic_recorder
 from yaml.loader import SafeLoader
 
 load_dotenv()
@@ -318,10 +318,6 @@ def main():
             st.rerun()
 
         st.divider()
-        st.subheader("Voice input")
-        audio_input = st.audio_input("🎤 Record a question")
-
-        st.divider()
         st.markdown("**Data sources**")
         st.markdown("- [TOW Rules Index](https://tow.whfb.app)")
         st.markdown("- [Old World Builder](https://old-world-builder.com)")
@@ -332,8 +328,6 @@ def main():
         st.session_state.messages = []
     if "sources_history" not in st.session_state:
         st.session_state.sources_history = []
-    if "last_audio_hash" not in st.session_state:
-        st.session_state.last_audio_hash = None
     if "pending_prompt" not in st.session_state:
         st.session_state.pending_prompt = None
 
@@ -359,24 +353,45 @@ def main():
                             line += f" _(similarity: {score})_"
                             st.markdown(line)
 
-    # ── Voice transcription ───────────────────────────────────────────────────
-    if audio_input is not None:
-        raw = audio_input.read()
-        audio_hash = hashlib.md5(raw).hexdigest()
-        if st.session_state.last_audio_hash != audio_hash:
-            st.session_state.last_audio_hash = audio_hash
-            with st.spinner("Transcribing audio…"):
-                try:
-                    client, _ = get_clients()
-                    transcribed = transcribe_audio(client, raw)
-                    if transcribed:
-                        st.session_state.pending_prompt = transcribed
-                except Exception as e:
-                    st.error(f"Transcription error: {e}")
-            st.rerun()
-
-    # ── Chat input ────────────────────────────────────────────────────────────
+    # ── Chat + voice input ────────────────────────────────────────────────────
+    # mic_recorder renders a compact 🎤/⏹ button (custom component).
+    # CSS fixes its iframe container to the bottom-right corner so it sits
+    # beside the sticky chat input bar — same pattern as ChatGPT / Claude.
+    # The chat input must stay at the top level (not inside any column) so
+    # Streamlit keeps it pinned to the bottom of the viewport.
+    st.markdown(
+        """
+        <style>
+        /* Fix the mic button to the bottom-right, overlapping the chat bar */
+        [data-testid="stCustomComponentV1"] {
+            position: fixed !important;
+            bottom: 12px !important;
+            right: 16px !important;
+            width: 40px !important;
+            z-index: 99999 !important;
+        }
+        /* Add right padding so typed text doesn't slide under the mic button */
+        [data-testid="stChatInput"] textarea {
+            padding-right: 56px !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    audio = mic_recorder(start_prompt="🎤", stop_prompt="⏹", just_once=True, key="mic")
     text_prompt = st.chat_input("Ask a rules question…")
+
+    # ── Voice transcription ───────────────────────────────────────────────────
+    if audio is not None:
+        with st.spinner("Transcribing audio…"):
+            try:
+                client, _ = get_clients()
+                transcribed = transcribe_audio(client, audio["bytes"])
+                if transcribed:
+                    st.session_state.pending_prompt = transcribed
+            except Exception as e:
+                st.error(f"Transcription error: {e}")
+        st.rerun()
     prompt = st.session_state.pending_prompt or text_prompt
     if st.session_state.pending_prompt:
         st.session_state.pending_prompt = None
