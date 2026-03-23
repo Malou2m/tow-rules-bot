@@ -258,12 +258,19 @@ def get_authenticator() -> stauth.Authenticate:
     with open(AUTH_CONFIG_PATH) as f:
         config = yaml.load(f, Loader=SafeLoader)
 
-    # Inject secrets from environment variables
-    config["credentials"]["usernames"]["tow"]["password"] = os.environ["AUTH_PASSWORD"]
+    username = os.environ["AUTH_USERNAME"]
+    credentials = {
+        "usernames": {
+            username: {
+                "name": username,
+                "password": os.environ["AUTH_PASSWORD"],
+            }
+        }
+    }
     config["cookie"]["key"] = os.environ["AUTH_COOKIE_KEY"]
 
     return stauth.Authenticate(
-        credentials=config["credentials"],
+        credentials=credentials,
         cookie_name=config["cookie"]["name"],
         cookie_key=config["cookie"]["key"],
         cookie_expiry_days=config["cookie"]["expiry_days"],

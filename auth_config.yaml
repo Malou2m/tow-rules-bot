@@ -1,11 +1,4 @@
-credentials:
-  usernames:
-    tow:
-      email: REDACTED
-      name: TOW
-      password: ""  # injected at runtime from AUTH_PASSWORD env var
-
 cookie:
   expiry_days: 7
-  key: ""  # injected at runtime from AUTH_COOKIE_KEY env var
   name: tow_rules_auth
+  key: ""  # injected at runtime from AUTH_COOKIE_KEY env var
