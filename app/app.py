@@ -257,17 +257,18 @@ def transcribe_audio(client: OpenAI, audio_bytes: bytes) -> str:
 def get_authenticator() -> stauth.Authenticate:
     with open(AUTH_CONFIG_PATH) as f:
         config = yaml.load(f, Loader=SafeLoader)
-    authenticator = stauth.Authenticate(
+
+    # Inject secrets from environment variables
+    config["credentials"]["usernames"]["tow"]["password"] = os.environ["AUTH_PASSWORD"]
+    config["cookie"]["key"] = os.environ["AUTH_COOKIE_KEY"]
+
+    return stauth.Authenticate(
         credentials=config["credentials"],
         cookie_name=config["cookie"]["name"],
         cookie_key=config["cookie"]["key"],
         cookie_expiry_days=config["cookie"]["expiry_days"],
         auto_hash=True,
     )
-    # Persist auto-hashed passwords back to the config file on first run
-    with open(AUTH_CONFIG_PATH, "w") as f:
-        yaml.dump(config, f, default_flow_style=False)
-    return authenticator
 
 
 def main():
